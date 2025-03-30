@@ -1,6 +1,7 @@
 import re
-from urllib.parse import urljoin
 import logging
+from urllib.parse import urljoin
+from collections import defaultdict
 
 import requests_cache
 from bs4 import BeautifulSoup
@@ -9,16 +10,14 @@ from tqdm import tqdm
 from constants import BASE_DIR, MAIN_DOC_URL, MAIN_PEP_URL, EXPECTED_STATUS
 from configs import configure_argument_parser, configure_logging
 from outputs import control_output
-from utils import get_response, find_tag
+from utils import get_response, find_tag, get_soup
+from exceptions import VersionsNotFound
 
 
 def whats_new(session):
     whats_new_url = urljoin(MAIN_DOC_URL, 'whatsnew/')
-    response = get_response(session, whats_new_url)
-    if response is None:
-        return
 
-    soup = BeautifulSoup(response.text, features='lxml')
+    soup = get_soup(session, whats_new_url)
     main_div = find_tag(soup, 'section', attrs={'id': 'what-s-new-in-python'})
     div_with_ul = find_tag(main_div, 'div', attrs={'class': 'toctree-wrapper'})
     sections_by_python = div_with_ul.find_all(
@@ -46,10 +45,7 @@ def whats_new(session):
 
 
 def latest_versions(session):
-    response = get_response(session, MAIN_DOC_URL)
-    if response is None:
-        return
-    soup = BeautifulSoup(response.text, features='lxml')
+    soup = get_soup(session, MAIN_DOC_URL)
 
     sidebar = find_tag(soup, 'div', attrs={'class': 'sphinxsidebarwrapper'})
     ul_tags = sidebar.find_all('ul')
@@ -59,7 +55,7 @@ def latest_versions(session):
             a_tags = ul.find_all('a')
             break
     else:
-        raise Exception('Ничего не нашлось')
+        raise VersionsNotFound('Ничего не нашлось')
 
     results = [('Ссылка на документацию', 'Версия', 'Статус')]
     pattern = r'Python (?P<version>\d\.\d+) \((?P<status>.*)\)'
@@ -79,11 +75,8 @@ def latest_versions(session):
 
 def download(session):
     downloads_url = urljoin(MAIN_DOC_URL, 'download.html')
-    response = get_response(session, downloads_url)
-    if response is None:
-        return
 
-    soup = BeautifulSoup(response.text, features='lxml')
+    soup = get_soup(session, downloads_url)
 
     main_tag = find_tag(soup, 'div', attrs={'role': 'main'})
     table_tag = find_tag(main_tag, 'table', attrs={'class': 'docutils'})
@@ -113,7 +106,7 @@ def pep(session):
     soup = BeautifulSoup(response.text, features='lxml')
     tbody = find_tag(soup, 'tbody')
     pep_list = tbody.find_all('tr')
-    status_counter = {}
+    status_counter = defaultdict(int)
     total_pep = 0
     mismatched_statuses = []
     result = [('Статус', 'Количество')]
@@ -129,20 +122,17 @@ def pep(session):
         for tag in dl:
             if 'Status:' in tag.text:
                 card_status = tag.next_sibling.next_sibling.string
-                if card_status not in EXPECTED_STATUS[preview_status]:
+                expected = EXPECTED_STATUS.get(preview_status)
+                if expected is None or card_status not in expected:
                     mismatched_statuses.append({
                         'url': pep_link,
                         'card_status': card_status,
-                        'expected_statuses': EXPECTED_STATUS[preview_status]
+                        'expected_statuses': expected or []
                     })
-                if card_status in status_counter:
-                    status_counter[card_status] += 1
-                else:
-                    status_counter[card_status] = 1
+                status_counter[card_status] += 1
                 total_pep += 1
     # Формируем итоговую таблицу
-    for status, count in sorted(status_counter.items()):
-        result.append((status, count))
+    result.extend(sorted(status_counter.items()))
     result.append(('Total', total_pep))
 
     if mismatched_statuses:
